@@ -9,11 +9,11 @@ from paddleocr import PaddleOCR
 import spacy
 
 # --- OPTIONAL: Google Vision imports (if you use fallback) ---
-try:
-    from google.cloud import vision
-    HAS_GOOGLE_VISION = True
-except ImportError:
-    HAS_GOOGLE_VISION = False
+# try:
+#     from google.cloud import vision
+#     HAS_GOOGLE_VISION = True
+# except ImportError:
+#     HAS_GOOGLE_VISION = False
 
 
 # ==========================
@@ -27,7 +27,7 @@ OCR_CONFIDENCE_THRESHOLD = 0.75  # if below this, try Google Vision
 
 # Regex patterns
 NPI_REGEX = re.compile(r"(?:NPI[:\s#-]*)?(\d{10})")
-PHONE_REGEX = re.compile(r"(\+?\d[\d\s().-]{7,}\d)")
+PHONE_REGEX = re.compile(r"(?<!\d)([2-9]\d{9})(?!\d)")
 LICENSE_REGEX = re.compile(
     r"(?:License(?:\s*No\.?| #| Number)?[:\s-]*)([A-Za-z0-9-]+)",
     re.IGNORECASE,
@@ -48,8 +48,8 @@ def get_nlp():
         except OSError as e:
             # Optional: fallback if trf model not installed
             print("[WARN] Could not load en_core_web_trf:", e)
-            print("[WARN] Falling back to en_core_web_sm")
-            NLP = spacy.load("en_core_web_sm")
+          #  print("[WARN] Falling back to en_core_web_sm")
+         #   NLP = spacy.load("en_core_web_sm")
     return NLP
 
 
@@ -71,94 +71,91 @@ def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[Any]:
 
 import numpy as np   # put this at the top
 
-def run_paddle_ocr(image) -> Tuple[List[Dict[str, Any]], float]:
-    """
-    Run PaddleOCR on a PIL image.
-    Returns: (list of text blocks, avg_confidence)
-    text blocks: {text, conf, box}
-    """
-    img_np = np.array(image)  # PIL -> numpy
+def run_paddle_ocr(image):
+    img_np = np.array(image)
+    result = PADDLE_OCR.predict(img_np)
 
-    result = PADDLE_OCR.ocr(img_np, cls=False)
+    if not result:
+        return [], "paddle"
+
+    texts = result[0]["rec_texts"]
+    scores = result[0]["rec_scores"]
+    print(texts)
     text_blocks = []
-    confidences = []
-
-    if not result or not result[0]:
-        return [], 0.0
-
-    for line in result[0]:
-        box, (txt, conf) = line
+    for txt, score in zip(texts, scores):
+        if not txt.strip():
+            continue
         text_blocks.append({
-            "text": txt,
-            "conf": float(conf),
-            "box": box,
+            "text": txt.strip(),  
+            "conf": float(score),   
         })
-        confidences.append(float(conf))
-
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-    return text_blocks, avg_conf
 
 
-def run_google_vision(image) -> Tuple[List[Dict[str, Any]], float]:
-    """
-    Run Google Vision OCR on a PIL image.
-    You must have GOOGLE_APPLICATION_CREDENTIALS set and google-cloud-vision installed.
-    Returns: (list of text blocks, avg_confidence)
-    """
-    if not HAS_GOOGLE_VISION:
-        # Fallback stub if library not installed
-        return [], 0.0
+    return text_blocks, "paddle"
 
-    client = vision.ImageAnnotatorClient()
 
-    # Convert PIL image to bytes
-    img_byte_arr = io.BytesIO()
-    image.save(img_byte_arr, format="PNG")
-    content = img_byte_arr.getvalue()
 
-    image_obj = vision.Image(content=content)
-    response = client.document_text_detection(image=image_obj)
-    annotation = response.full_text_annotation
 
-    text_blocks = []
-    confidences = []
+# def run_google_vision(image) -> Tuple[List[Dict[str, Any]], float]:
+#     """
+#     Run Google Vision OCR on a PIL image.
+#     You must have GOOGLE_APPLICATION_CREDENTIALS set and google-cloud-vision installed.
+#     Returns: (list of text blocks, avg_confidence)
+#     """
+#     if not HAS_GOOGLE_VISION:
+#         # Fallback stub if library not installed
+#         return [], 0.0
 
-    for page in annotation.pages:
-        for block in page.blocks:
-            block_text = []
-            block_confidences = []
-            for paragraph in block.paragraphs:
-                for word in paragraph.words:
-                    word_text = "".join(
-                        [symbol.text for symbol in word.symbols]
-                    )
-                    block_text.append(word_text)
-                    if word.confidence is not None:
-                        block_confidences.append(float(word.confidence))
+#     client = vision.ImageAnnotatorClient()
 
-            txt = " ".join(block_text).strip()
-            if not txt:
-                continue
+#     # Convert PIL image to bytes
+#     img_byte_arr = io.BytesIO()
+#     image.save(img_byte_arr, format="PNG")
+#     content = img_byte_arr.getvalue()
 
-            # Approximate bounding box
-            box = [
-                (v.x, v.y) for v in block.bounding_box.vertices
-            ]
+#     image_obj = vision.Image(content=content)
+#     response = client.document_text_detection(image=image_obj)
+#     annotation = response.full_text_annotation
 
-            if block_confidences:
-                c = sum(block_confidences) / len(block_confidences)
-                confidences.append(c)
-            else:
-                c = 0.0
+#     text_blocks = []
+#     confidences = []
 
-            text_blocks.append({
-                "text": txt,
-                "conf": c,
-                "box": box,
-            })
+#     for page in annotation.pages:
+#         for block in page.blocks:
+#             block_text = []
+#             block_confidences = []
+#             for paragraph in block.paragraphs:
+#                 for word in paragraph.words:
+#                     word_text = "".join(
+#                         [symbol.text for symbol in word.symbols]
+#                     )
+#                     block_text.append(word_text)
+#                     if word.confidence is not None:
+#                         block_confidences.append(float(word.confidence))
 
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-    return text_blocks, avg_conf
+#             txt = " ".join(block_text).strip()
+#             if not txt:
+#                 continue
+
+#             # Approximate bounding box
+#             box = [
+#                 (v.x, v.y) for v in block.bounding_box.vertices
+#             ]
+
+#             if block_confidences:
+#                 c = sum(block_confidences) / len(block_confidences)
+#                 confidences.append(c)
+#             else:
+#                 c = 0.0
+
+#             text_blocks.append({
+#                 "text": txt,
+#                 "conf": c,
+#                 "box": box,
+#             })
+
+#     avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+#     return text_blocks, avg_conf
 
 
 def run_ocr_with_fallback(image, threshold: float = OCR_CONFIDENCE_THRESHOLD):
@@ -166,37 +163,35 @@ def run_ocr_with_fallback(image, threshold: float = OCR_CONFIDENCE_THRESHOLD):
     Run PaddleOCR, and if quality is poor, fallback to Google Vision.
     Returns: (text_blocks, avg_conf, engine_used)
     """
-    paddle_blocks, paddle_conf = run_paddle_ocr(image)
-    engine_used = "paddle"
-    text_blocks = paddle_blocks
-    avg_conf = paddle_conf
+    text_blocks, engine_used = run_paddle_ocr(image)
+    # avg_conf = paddle_conf
 
-    if paddle_conf < threshold and HAS_GOOGLE_VISION:
-        gv_blocks, gv_conf = run_google_vision(image)
-        if gv_conf > paddle_conf:
-            text_blocks = gv_blocks
-            avg_conf = gv_conf
-            engine_used = "google_vision"
+    # if paddle_conf < threshold and HAS_GOOGLE_VISION:
+    #     gv_blocks, gv_conf = run_google_vision(image)
+    #     if gv_conf > paddle_conf:
+    #         text_blocks = gv_blocks
+    #         avg_conf = gv_conf
+    #         engine_used = "google_vision"
 
-    return text_blocks, avg_conf, engine_used
+    return text_blocks, engine_used
 
 
-def assemble_text(text_blocks: List[Dict[str, Any]]) -> str:
-    """
-    Assemble text blocks into a single text string.
-    Sort by Y then X for a more natural reading order.
-    """
-    def _key(block):
-        # box is list of 4 points; take top-left
-        box = block["box"]
-        if not box:
-            return (0, 0)
-        x = box[0][0]
-        y = box[0][1]
-        return (y, x)
+# def assemble_text(text_blocks: List[Dict[str, Any]]) -> str:
+#     """
+#     Assemble text blocks into a single text string.
+#     Sort by Y then X for a more natural reading order.
+#     """
+#     def _key(block):
+#         # box is list of 4 points; take top-left
+#         box = block["box"]
+#         if not box:
+#             return (0, 0)
+#         x = box[0][0]
+#         y = box[0][1]
+#         return (y, x)
 
-    sorted_blocks = sorted(text_blocks, key=_key)
-    return "\n".join(b["text"] for b in sorted_blocks if b["text"].strip())
+#     sorted_blocks = sorted(text_blocks, key=_key)
+#     return "\n".join(b["text"] for b in sorted_blocks if b["text"].strip())
 
 
 # ==========================
@@ -314,12 +309,16 @@ def extract_fields(text: str) -> Tuple[Dict[str, Any], Dict[str, float], float]:
     """
     nlp = get_nlp()
     doc = nlp(text)
+        # Pre-clean OCR text for emails
+    clean_text = re.sub(r"\s*@\s*", "@", text)
+    text = re.sub(r"\s*\.\s*", ".", clean_text)
 
     data = {
         "NPI": None,
         "Provider Name (Legal name)": None,
         "Address": None,
         "Phone number": None,
+        "Email address": None,
         "License number": None,
         "Specialities": None,
     }
@@ -348,6 +347,13 @@ def extract_fields(text: str) -> Tuple[Dict[str, Any], Dict[str, float], float]:
     if lic_match:
         data["License number"] = lic_match.group(1).strip()
         conf["License number"] = 0.9
+        
+    # Email address
+    email_match = EMAIL_REGEX.search(text)
+    if email_match:
+        email = normalize_email(email_match.group(0))
+        data["Email address"] = email
+        conf["Email address"] = 0.95
 
     # Specialities
     specs, specs_conf = extract_specialities(text)
@@ -396,6 +402,22 @@ def normalize_phone(phone: Any) -> Any:
     if len(digits) == 10:
         return f"({digits[0:3]}) {digits[3:6]}-{digits[6:]}"
     return digits  # leave as-is if not 10 digits
+
+
+def normalize_email(raw: str) -> str:
+    """
+    Fix common OCR email issues:
+    - spaces around @ and .
+    - ' dot ' → '.'
+    """
+    if not raw:
+        return None
+
+    email = raw.lower()
+    email = re.sub(r"\s*@\s*", "@", email)
+    email = re.sub(r"\s*\.\s*", ".", email)
+    email = email.replace(" dot ", ".")
+    return email
 
 
 def normalize_specialities(specs: Any) -> Any:
@@ -461,10 +483,10 @@ def process_pdf(pdf_path: str) -> pd.DataFrame:
     ocr_scores = []
 
     for img in images:
-        blocks, score, engine = run_ocr_with_fallback(img)
-        page_text = assemble_text(blocks)
+        blocks, engine = run_ocr_with_fallback(img)
+        page_text = "\n".join(b["text"] for b in blocks)
         all_page_texts.append(page_text)
-        ocr_scores.append(score)
+       # ocr_scores.append(score)
         # If multiple pages, you could store per-page engines;
         # for simplicity just track the last one that was used.
         engine_used = engine
@@ -475,7 +497,7 @@ def process_pdf(pdf_path: str) -> pd.DataFrame:
 
     meta = {
         "engine": engine_used,
-        "ocr_conf": sum(ocr_scores) / len(ocr_scores) if ocr_scores else 0.0,
+        #"ocr_conf": sum(ocr_scores) / len(ocr_scores) if ocr_scores else 0.0,
         "extraction_conf": extraction_conf,
         "source_file": os.path.abspath(pdf_path),
     }
