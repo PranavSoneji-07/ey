@@ -1,0 +1,61 @@
+{
+  "result_count": 1,
+  "results": [
+    {
+      "created_epoch": "1490278899000",
+      "enumeration_type": "NPI-1",
+      "last_updated_epoch": "1689887805000",
+      "number": "1417488305",
+      "addresses": [
+        {
+          "country_code": "US",
+          "country_name": "United States",
+          "address_purpose": "MAILING",
+          "address_type": "DOM",
+          "address_1": "PO BOX 20452",
+          "city": "COLUMBUS",
+          "state": "OH",
+          "postal_code": "432200452",
+          "telephone_number": "614-457-8180"
+        },
+        {
+          "country_code": "US",
+          "country_name": "United States",
+          "address_purpose": "LOCATION",
+          "address_type": "DOM",
+          "address_1": "3535 OLENTANGY RIVER RD",
+          "city": "COLUMBUS",
+          "state": "OH",
+          "postal_code": "432143908",
+          "telephone_number": "614-566-4945"
+        }
+      ],
+      "practiceLocations": [],
+      "basic": {
+        "first_name": "WILLIAM",
+        "last_name": "SINCLAIR",
+        "middle_name": "DAVID",
+        "credential": "MD",
+        "sole_proprietor": "NO",
+        "sex": "M",
+        "enumeration_date": "2017-03-23",
+        "last_updated": "2023-07-20",
+        "certification_date": "2023-07-20",
+        "status": "A"
+      },
+      "taxonomies": [
+        {
+          "code": "207ZP0102X",
+          "taxonomy_group": "",
+          "desc": "Pathology, Anatomic Pathology & Clinical Pathology",
+          "state": "OH",
+          "license": "35.143577",
+          "primary": true
+        }
+      ],
+      "identifiers": [],
+      "endpoints": [],
+      "other_names": []
+    }
+  ]
+}
