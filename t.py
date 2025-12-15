@@ -1,5 +1,4 @@
 from paddleocr import PaddleOCR
-import cv2
 
 # Initialize OCR
 ocr = PaddleOCR(lang="en")

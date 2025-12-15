@@ -7,18 +7,15 @@ import pandas as pd
 from pdf2image import convert_from_path
 from paddleocr import PaddleOCR
 import spacy
+"""
+--- OPTIONAL: Google Vision imports (if you use fallback) ---
+try:
+    from google.cloud import vision
+    HAS_GOOGLE_VISION = True
+except ImportError:
+    HAS_GOOGLE_VISION = False
+"""
 
-# --- OPTIONAL: Google Vision imports (if you use fallback) ---
-# try:
-#     from google.cloud import vision
-#     HAS_GOOGLE_VISION = True
-# except ImportError:
-#     HAS_GOOGLE_VISION = False
-
-
-# ==========================
-# CONFIG / CONSTANTS
-# ==========================
 
 # OCR
 PADDLE_LANG = "en"
@@ -95,67 +92,68 @@ def run_paddle_ocr(image):
 
 
 
+"""
+ def run_google_vision(image) -> Tuple[List[Dict[str, Any]], float]:
+    
+    Run Google Vision OCR on a PIL image.
+    You must have GOOGLE_APPLICATION_CREDENTIALS set and google-cloud-vision installed.
+    Returns: (list of text blocks, avg_confidence)
+    
+    if not HAS_GOOGLE_VISION:
+        # Fallback stub if library not installed
+        return [], 0.0
 
-# def run_google_vision(image) -> Tuple[List[Dict[str, Any]], float]:
-#     """
-#     Run Google Vision OCR on a PIL image.
-#     You must have GOOGLE_APPLICATION_CREDENTIALS set and google-cloud-vision installed.
-#     Returns: (list of text blocks, avg_confidence)
-#     """
-#     if not HAS_GOOGLE_VISION:
-#         # Fallback stub if library not installed
-#         return [], 0.0
+    client = vision.ImageAnnotatorClient()
 
-#     client = vision.ImageAnnotatorClient()
+    # Convert PIL image to bytes
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format="PNG")
+    content = img_byte_arr.getvalue()
 
-#     # Convert PIL image to bytes
-#     img_byte_arr = io.BytesIO()
-#     image.save(img_byte_arr, format="PNG")
-#     content = img_byte_arr.getvalue()
+    image_obj = vision.Image(content=content)
+    response = client.document_text_detection(image=image_obj)
+    annotation = response.full_text_annotation
 
-#     image_obj = vision.Image(content=content)
-#     response = client.document_text_detection(image=image_obj)
-#     annotation = response.full_text_annotation
+    text_blocks = []
+    confidences = []
 
-#     text_blocks = []
-#     confidences = []
+    for page in annotation.pages:
+        for block in page.blocks:
+            block_text = []
+            block_confidences = []
+            for paragraph in block.paragraphs:
+                for word in paragraph.words:
+                    word_text = "".join(
+                        [symbol.text for symbol in word.symbols]
+                    )
+                    block_text.append(word_text)
+                    if word.confidence is not None:
+                        block_confidences.append(float(word.confidence))
 
-#     for page in annotation.pages:
-#         for block in page.blocks:
-#             block_text = []
-#             block_confidences = []
-#             for paragraph in block.paragraphs:
-#                 for word in paragraph.words:
-#                     word_text = "".join(
-#                         [symbol.text for symbol in word.symbols]
-#                     )
-#                     block_text.append(word_text)
-#                     if word.confidence is not None:
-#                         block_confidences.append(float(word.confidence))
+            txt = " ".join(block_text).strip()
+            if not txt:
+                continue
 
-#             txt = " ".join(block_text).strip()
-#             if not txt:
-#                 continue
+            # Approximate bounding box
+            box = [
+                (v.x, v.y) for v in block.bounding_box.vertices
+            ]
 
-#             # Approximate bounding box
-#             box = [
-#                 (v.x, v.y) for v in block.bounding_box.vertices
-#             ]
+            if block_confidences:
+                c = sum(block_confidences) / len(block_confidences)
+                confidences.append(c)
+            else:
+                c = 0.0
 
-#             if block_confidences:
-#                 c = sum(block_confidences) / len(block_confidences)
-#                 confidences.append(c)
-#             else:
-#                 c = 0.0
+            text_blocks.append({
+                "text": txt,
+                "conf": c,
+                "box": box,
+            })
 
-#             text_blocks.append({
-#                 "text": txt,
-#                 "conf": c,
-#                 "box": box,
-#             })
-
-#     avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-#     return text_blocks, avg_conf
+    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    return text_blocks, avg_conf
+"""
 
 
 def run_ocr_with_fallback(image, threshold: float = OCR_CONFIDENCE_THRESHOLD):
@@ -175,28 +173,28 @@ def run_ocr_with_fallback(image, threshold: float = OCR_CONFIDENCE_THRESHOLD):
 
     return text_blocks, engine_used
 
+"""
+def assemble_text(text_blocks: List[Dict[str, Any]]) -> str:
+    
+    Assemble text blocks into a single text string.
+    Sort by Y then X for a more natural reading order.
+    
+    def _key(block):
+        # box is list of 4 points; take top-left
+        box = block["box"]
+        if not box:
+            return (0, 0)
+        x = box[0][0]
+        y = box[0][1]
+        return (y, x)
 
-# def assemble_text(text_blocks: List[Dict[str, Any]]) -> str:
-#     """
-#     Assemble text blocks into a single text string.
-#     Sort by Y then X for a more natural reading order.
-#     """
-#     def _key(block):
-#         # box is list of 4 points; take top-left
-#         box = block["box"]
-#         if not box:
-#             return (0, 0)
-#         x = box[0][0]
-#         y = box[0][1]
-#         return (y, x)
-
-#     sorted_blocks = sorted(text_blocks, key=_key)
-#     return "\n".join(b["text"] for b in sorted_blocks if b["text"].strip())
+    sorted_blocks = sorted(text_blocks, key=_key)
+    return "\n".join(b["text"] for b in sorted_blocks if b["text"].strip())
+"""
 
 
-# ==========================
 # NLP / EXTRACTION
-# ==========================
+
 
 def extract_provider_name(doc: spacy.tokens.Doc) -> Tuple[str, float]:
     """
