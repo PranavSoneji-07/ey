@@ -33,7 +33,7 @@ def get_nlp():
     global NLP
     if NLP is None:
         try:
-            NLP = spacy.load("en_core_web_trf")
+            NLP = spacy.load("en_core_web_sm")
         except OSError:
             print("[WARN] Could not load en_core_web_trf.")
     return NLP
@@ -42,7 +42,7 @@ def get_nlp():
 # PDF & OCR HELPERS
 # ==========================
 
-def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[Any]:
+def pdf_to_images(pdf_path: str, dpi: int = 150) -> List[Any]:
     return convert_from_path(pdf_path, dpi=dpi)
 
 def run_paddle_ocr(image):
