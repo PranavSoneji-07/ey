@@ -22,9 +22,9 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],  # Allow GET, POST, OPTIONS, etc.
     allow_headers=["*"],
 )
 class ProviderInput(BaseModel):
@@ -73,7 +73,7 @@ class StructuredDataOutput(BaseModel):
     
     # --- ADDED: Comprehensive NPI Fields ---
     validated_legal_name: str
-    validated_license_id: Union[str, None] = None
+    validated_license_id: str
     validated_specialty: str
     # -------------------------------------
 
