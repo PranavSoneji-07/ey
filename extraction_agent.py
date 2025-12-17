@@ -1,4 +1,5 @@
 import os
+os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
 import io
 import re
 from typing import List, Dict, Any, Tuple
