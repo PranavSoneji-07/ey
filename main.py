@@ -1,6 +1,7 @@
 import os
 os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Union, Optional
 import httpx 
@@ -9,10 +10,23 @@ import asyncio
 import shutil
 import pandas as pd
 
-from extraction_agent import process_pdf 
+from p import process_pdf 
+
 
 app = FastAPI()
 
+origins = [
+    "http://localhost:3000",  # Your Next.js Frontend
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow GET, POST, OPTIONS, etc.
+    allow_headers=["*"],
+)
 class ProviderInput(BaseModel):
     npi: str = Field(..., description="NPI ID to validate.")
 class BatchInput(BaseModel):
@@ -187,7 +201,7 @@ async def validate_single_provider(provider_data: ProviderInput) -> StructuredDa
     # 2. Extract fields for concurrent calls
     npi_address = npi_result["address"]
     npi_license = npi_result["license_id"]
-    npi_state = npi_result["state_code"]
+    npi_state = npi_result["state"]
     npi_website = npi_result["website_url"] 
 
     # 3. SYNCHRONIZE 3 CONCURRENT CALLS
@@ -238,43 +252,65 @@ async def validate_single_provider(provider_data: ProviderInput) -> StructuredDa
 # --- ENDPOINTS ---
 
 # 1. PDF Pipeline Endpoint (The new primary flow)
-@app.post("/validate/pdf_pipeline", response_model=StructuredDataOutput)
+# In main.py
+
+# In main.py
+
+# CHANGE: Response model is now a LIST
+@app.post("/validate/pdf_pipeline", response_model=List[StructuredDataOutput])
 async def run_single_pdf_pipeline(pdf_file: UploadFile = File(...)):
     """
-    Runs the full pipeline: PDF -> Extraction -> NPI Lookup -> Concurrent Validation.
+    Multi-Provider Pipeline: 
+    1. OCR 10-page PDF -> Extracts 10 Providers
+    2. Runs Validation on ALL 10 concurrently
     """
     temp_file_path = f"temp_{pdf_file.filename}"
-    
-    # --- 1. Data Extraction Agent (Sequential) ---
     temp_path = save_upload_file_temp(pdf_file, temp_file_path)
     
-    # Use asyncio.to_thread to run the blocking/synchronous OCR function 
-    ocr_data: Dict[str, Any] = await asyncio.to_thread(process_pdf, temp_path) 
-    os.unlink(temp_path)
+    # 1. Run OCR (This now returns a LIST of providers from all pages)
+    ocr_generator = await asyncio.to_thread(process_pdf, temp_path)
     
-    # Extract the key field for validation
-    npi_id = ocr_data.get("NPI")
-    if not npi_id:
-        raise HTTPException(status_code=400, detail="Extraction failed: Could not reliably find NPI ID in the document.")
+    all_extracted_providers = []
+    
+    # Consume the generator to get all batches
+    if hasattr(ocr_generator, "__iter__"):
+        for batch in ocr_generator:
+            all_extracted_providers.extend(batch)
+    
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
 
-    # 2. Orchestration Agent: Use the extracted NPI ID to run the validation flow
-    provider_data = ProviderInput(npi=npi_id)
+    if not all_extracted_providers:
+        raise HTTPException(status_code=400, detail="No NPIs found in any of the pages.")
+
+    # 2. Prepare Validation Tasks for ALL providers found
+    validation_tasks = []
     
-    # Call the core validation logic
-    validation_output = await validate_single_provider(provider_data)
+    for ocr_data in all_extracted_providers:
+        npi_id = ocr_data.get("npi_number") or ocr_data.get("NPI")
+        
+        if npi_id and npi_id != "N/A":
+            # Pass the OCR data to the validator so we can merge it later
+            task = validate_and_merge(npi_id, ocr_data)
+            validation_tasks.append(task)
+
+    # 3. Run all validations in parallel (Fast!)
+    results = await asyncio.gather(*validation_tasks)
     
-    # --- 3. Merge OCR Data with Validation Output ---
+    return results
+
+# --- HELPER FUNCTION TO KEEP CODE CLEAN ---
+async def validate_and_merge(npi_id: str, ocr_data: dict) -> StructuredDataOutput:
+    # Run the core check
+    validation_output = await validate_single_provider(ProviderInput(npi=npi_id))
     
-    # Use the validation output's data and override the dummy OCR fields
+    # Merge OCR Metadata
     return validation_output.copy(update={
         "ocr_extracted_name": ocr_data.get("Provider Name (Legal name)", "N/A"),
         "ocr_extracted_address": ocr_data.get("Address", "N/A"),
-        "ocr_extracted_phone": ocr_data.get("Phone number", "N/A"),
-        "ocr_extracted_email": ocr_data.get("Email address", None),
-        "ocr_extracted_specialities": ocr_data.get("Specialities", None),
+        "ocr_extracted_phone": ocr_data.get("phone", "N/A"),
         "ocr_extraction_confidence": ocr_data.get("extraction_confidence", 0.0)
     })
-
 # 2. Full Batch Processing Endpoint
 @app.post("/validate/batch", response_model=List[StructuredDataOutput])
 async def validate_provider_batch(batch_data: BatchInput):

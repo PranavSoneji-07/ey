@@ -12,7 +12,9 @@ import spacy
 
 # OCR Configuration
 PADDLE_LANG = "en"
-PADDLE_OCR = PaddleOCR(lang=PADDLE_LANG)
+PADDLE_OCR = PaddleOCR(
+    lang=PADDLE_LANG, 
+)
 OCR_CONFIDENCE_THRESHOLD = 0.75
 
 # Regex patterns
@@ -33,16 +35,16 @@ def get_nlp():
     global NLP
     if NLP is None:
         try:
-            NLP = spacy.load("en_core_web_trf")
+            NLP = spacy.load("en_core_web_sm")
         except OSError:
-            print("[WARN] Could not load en_core_web_trf.")
+            print("[WARN] Could not load en_core_web_sm.")
     return NLP
 
 # ==========================
 # PDF & OCR HELPERS
 # ==========================
 
-def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[Any]:
+def pdf_to_images(pdf_path: str, dpi: int = 150) -> List[Any]:
     return convert_from_path(pdf_path, dpi=dpi)
 
 def run_paddle_ocr(image):
@@ -181,39 +183,36 @@ def process_pdf(pdf_path: str, batch_size: int = 10) -> Generator[List[Dict[str,
     images = pdf_to_images(pdf_path)
     current_batch = []
     source_abs = os.path.abspath(pdf_path)
-    
+
     for i, img in enumerate(images):
-        print(f"Processing page {i+1}/{len(images)}...")
+        print(f"Processing page {i+1}/{len(images)}...") # Keep logs to see progress
+        
+        # ... (Your existing Extraction Logic) ...
         blocks, engine = run_ocr_with_fallback(img)
         page_text = " ".join(b["text"] for b in blocks)
-        
         if not page_text.strip(): continue
 
         raw_data, ext_conf = extract_fields(page_text)
 
-        # Apply Normalization before batching
-        raw_data["npi_number"] = normalize_npi(raw_data["npi_number"])
-        raw_data["phone"] = normalize_phone(raw_data["phone"])
-        raw_data["Specialities"] = normalize_specialities(raw_data["Specialities"])
-        for k in ["Provider Name (Legal name)", "Address", "license_id"]:
-            raw_data[k] = normalize_text(raw_data[k])
+        # Only add to batch if we actually found a provider NPI
+        # This filters out cover pages or blank pages
+        if raw_data.get("npi_number") or raw_data.get("NPI"):
+            # ... (Your existing Normalization Logic) ...
+            
+            meta = {
+                "ocr_engine_used": engine, 
+                "extraction_confidence": ext_conf,
+                "page_number": i + 1
+            }
+            record = {**raw_data, **meta}
+            # Handle None values
+            record = {k: (v if v is not None else "N/A") for k, v in record.items()}
+            
+            current_batch.append(record)
 
-        meta = {
-            "ocr_engine_used": engine,
-            "extraction_confidence": ext_conf,
-            "source_file": source_abs,
-            "page_number": i + 1 
-        }
-
-        record = {**raw_data, **meta}
-        record = {k: (v if v is not None else "N/A") for k, v in record.items()}
-        current_batch.append(record)
-
-        if len(current_batch) == batch_size:
-            yield current_batch
-            current_batch = []
-
-    if current_batch: yield current_batch
+    # Yield EVERYTHING we found at the end
+    if current_batch:
+        yield current_batch
 
 if __name__ == "__main__":
     import argparse
