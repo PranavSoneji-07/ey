@@ -4,7 +4,7 @@ import io
 
 import re
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Generator
 
 import numpy as np
 
@@ -52,13 +52,7 @@ NPI_REGEX = re.compile(r"(?:NPI[:\s#-]*)?(\d{10})")
 
 PHONE_REGEX = re.compile(r"(?<!\d)([2-9]\d{9})(?!\d)")
 
-LICENSE_REGEX = re.compile(
-
-    r"(?:License(?:\s*No\.?| #| Number)?[:\s-]*)([A-Za-z0-9-]+)",
-
-    re.IGNORECASE,
-
-)
+LICENSE_REGEX = re.compile(r"(?:License(?:\s*No\.?| #| Number)?[:\s-]*)([A-Za-z0-9-]+)",re.IGNORECASE)
 
 
 
@@ -922,80 +916,87 @@ def normalize_record(raw_data: Dict[str, Any], meta: Dict[str, Any]) -> pd.DataF
 # MAIN PIPELINE
 # ==========================
 
-def process_pdf(pdf_path: str) -> pd.DataFrame:
+# ==========================
+# MAIN PIPELINE
+# ==========================
+
+def process_pdf(pdf_path: str, batch_size: int = 10) -> Generator[List[Dict[str, Any]], None, None]:
     """
-    Modified pipeline:
-    - PDF -> images
-    - For EACH image:
-        - OCR 
-        - NLP extraction
-        - Normalization
-    - Concatenate all results into one DataFrame
+    Processes the PDF and YIELDS a list of dictionaries every N providers.
     """
     images = pdf_to_images(pdf_path)
-    
-    all_records = []
+    current_batch = []
     source_abs = os.path.abspath(pdf_path)
 
     for i, img in enumerate(images):
         print(f"Processing page {i+1}/{len(images)}...")
         
-        # 1. OCR for this specific page
         blocks, engine = run_ocr_with_fallback(img)
         page_text = "\n".join(b["text"] for b in blocks)
         
         if not page_text.strip():
             continue
 
-        # 2. Extract fields for this specific page
+        # Extract fields
         raw_data, field_conf, extraction_conf = extract_fields(page_text)
 
-        # 3. Create metadata for this page
+        # Meta information
         meta = {
-            "engine": engine,
-            "ocr_conf": 0.0, # Placeholder as you've commented out the scoring logic
-            "extraction_conf": extraction_conf,
+            "ocr_engine_used": engine,
+            "ocr_quality_score": 0.0,
+            "extraction_confidence": extraction_conf,
             "source_file": source_abs,
-            "page_number": i + 1  # Added to track which page the data came from
+            "page_number": i + 1 
         }
 
-        # 4. Normalize and convert to a single-row DF
-        page_df = normalize_record(raw_data, meta)
-        all_records.append(page_df)
+        # Merge extraction data and meta into one dictionary
+        # We bypass the DataFrame here to avoid "NaN" issues in dictionaries
+        record_dict = {**raw_data, **meta}
+        
+        # Explicitly clean the dictionary (replaces NaN with None for better visibility)
+        record_dict = {k: (v if v is not None else "N/A") for k, v in record_dict.items()}
+        
+        current_batch.append(record_dict)
 
-    if not all_records:
-        return pd.DataFrame()
+        # Yield when batch is full
+        if len(current_batch) == batch_size:
+            yield current_batch
+            current_batch = []
 
-    # Concatenate all page DataFrames into one large table
-    final_df = pd.concat(all_records, ignore_index=True)
-    return final_df
+    # Final leftover batch
+    if current_batch:
+        yield current_batch
 
 
 # ==========================
-# CLI / DEMO
+# UPDATED CLI
 # ==========================
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Extract provider details from a scanned PDF."
-    )
+    parser = argparse.ArgumentParser(description="Extract provider details.")
     parser.add_argument("pdf_path", help="Path to the input PDF file")
-    parser.add_argument(
-        "--out",
-        help="Output CSV file path",
-        default="provider_output.csv",
-    )
+    parser.add_argument("--out", help="Output CSV path", default="provider_output.csv")
     args = parser.parse_args()
 
-    # Now returns a DataFrame with multiple rows (one per page)
-    df_result = process_pdf(args.pdf_path)
+    all_data_for_csv = []
     
-    if not df_result.empty:
-        print(f"Extraction Result ({len(df_result)} records found):")
-        print(df_result.to_string(index=False))
-        df_result.to_csv(args.out, index=False)
-        print(f"\nSaved {len(df_result)} entries to: {args.out}")
+    print(f"Starting extraction for: {args.pdf_path}")
+    
+    # Set batch_size=10 here
+    for batch_num, batch_data in enumerate(process_pdf(args.pdf_path, batch_size=10), 1):
+        print(f"\n--- BATCH {batch_num} RECEIVED ({len(batch_data)} providers) ---")
+        
+        # Verification: Print each dictionary
+        for provider in batch_data:
+            print(f"Found: {provider.get('Provider Name (Legal name)')} | NPI: {provider.get('NPI')}")
+            all_data_for_csv.append(provider)
+
+    # Save the final CSV
+    if all_data_for_csv:
+        final_df = pd.DataFrame(all_data_for_csv)
+        final_df.to_csv(args.out, index=False)
+        print(f"\nSUCCESS: Total {len(all_data_for_csv)} providers saved to {args.out}")
     else:
-        print("No data extracted.")
+        print("ERROR: No data was extracted from the PDF.")
