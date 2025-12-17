@@ -2,32 +2,28 @@ import os
 os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 import httpx 
 import asyncio
 
 import shutil
 import pandas as pd
 
-# Import the necessary synchronous function from your extraction file
 from extraction_agent import process_pdf 
 
-# --- FastAPI App Initialization ---
 app = FastAPI()
 
-# --- Pydantic Schemas (The Contract) ---
-
-# Input data for all NPI lookups
 class ProviderInput(BaseModel):
     npi: str = Field(..., description="NPI ID to validate.")
-
-# Batch Input Schema for the /validate/batch endpoint
 class BatchInput(BaseModel):
     providers: List[ProviderInput]
 
-# --- NEW: Simplified NPI Output Schema (For /batch/npi_lookup) ---
-# --- NEW: Simplified NPI Output Schema (MODIFIED) ---
-# --- NpiDetailsOutput Schema in main.py (UPDATE THIS) ---
+class LicenseValidation(BaseModel):
+    is_valid: bool = False
+    status: str = "PENDING"  # PENDING, VALID, EXPIRED, NOT_FOUND
+    expiry_date: Optional[str] = None
+    last_verified: Optional[str] = None
+
 class NpiDetailsOutput(BaseModel):
     npi_number: str
     status: str
@@ -38,7 +34,8 @@ class NpiDetailsOutput(BaseModel):
     legal_name: Union[str, None] = None
     license_id: Union[str, None] = None
     specialty: Union[str, None] = None
-    
+    state: str = "N/A"
+    validation_details: LicenseValidation = LicenseValidation()
     # --- NEW FIELDS ---
     email: Union[str, None] = None
     website_url: Union[str, None] = None
@@ -89,7 +86,7 @@ def save_upload_file_temp(upload_file: UploadFile, destination: str) -> str:
 
 # 1. Data Validation Agent: NPI Lookup (Live API)
 async def lookup_npi_registry(npi_number: str) -> dict:
-    """Queries NPI Registry for core demographics, including legal name, license, and specialty."""
+    """Queries NPI Registry and prepares state-aware data for sequential validation."""
     NPI_API_URL = "https://npiregistry.cms.hhs.gov/api/"
     params = {"version": "2.1", "number": npi_number}
     
@@ -103,49 +100,50 @@ async def lookup_npi_registry(npi_number: str) -> dict:
                 result = data["results"][0]
                 basic = result.get("basic", {})
                 
-                # Robust extraction of Address (prioritizing LOCATION)
-                practice_address_list = [addr for addr in result.get("addresses", []) if addr.get("address_purpose") == "LOCATION"]
+                # 1. Extract State Code from Primary Location (Crucial for Routing)
+                practice_address_list = [addr for addr in result.get("addresses", []) 
+                                         if addr.get("address_purpose") == "LOCATION"]
                 address_info = practice_address_list[0] if practice_address_list else result.get("addresses", [{}])[0]
+                state_code = address_info.get('state', 'N/A')
                 
-                # Extract primary taxonomy (license and specialty data)
+                # 2. Extract License and Specialty
                 primary_taxonomy = [t for t in result.get("taxonomies", []) if t.get("primary") == True]
                 taxonomy_info = primary_taxonomy[0] if primary_taxonomy else result.get("taxonomies", [{}])[0]
 
-                # Extract the legal business name or full name
+                # 3. Handle Names
                 legal_name = basic.get('organization_name', f"{basic.get('first_name', '')} {basic.get('last_name', '')}").strip()
                 
-                # Extract Website (if available)
-                # The CMS API lists website in "endpoints" or "addresses" depending on version. 
-                # We will use a mock for consistency in the demo.
-                website_url = "https://www.example-provider.com" # MOCK URL for demo
-                
-                # MOCK Email as CMS API does not provide it
-                email_address = f"info@{legal_name.lower().replace(' ', '')}.com" if legal_name else "default@provider.com"
+                # 4. Generate Mock Contact Data
+                website_url = "https://www.example-provider.com"
+                email_address = f"info@{legal_name.lower().replace(' ', '')}.com"
 
-                # Extract License ID and Specialty (now correctly pulled from taxonomy_info)
-                license_id = taxonomy_info.get("license", "N/A")
-                specialty = taxonomy_info.get("desc", taxonomy_info.get("code", "N/A"))
-
+                # RETURN STRUCTURE (Aligned with upgraded Pydantic Model)
                 return {
                     "status": "SUCCESS",
-                    "name": legal_name, 
-                    "address": f"{address_info.get('address_1', 'N/A')}, {address_info.get('city', '')}, {address_info.get('state', '')}",
-                    "phone": address_info.get("telephone_number", "N/A"),
-                    
-                    # --- COMPREHENSIVE FIELDS (Updated) ---
+                    "npi_number": npi_number,
+                    "name": legal_name,
                     "legal_name": legal_name,
-                    "license_id": license_id,
-                    "state_code": taxonomy_info.get("state", "N/A"),
-                    "specialty": specialty, 
+                    "state": state_code, # Used for routing the next call
+                    "license_id": taxonomy_info.get("license", "N/A"),
+                    "specialty": taxonomy_info.get("desc", "N/A"),
+                    "address": f"{address_info.get('address_1', '')}, {address_info.get('city', '')}, {state_code}",
+                    "phone": address_info.get("telephone_number", "N/A"),
+                    "email": email_address,
                     "website_url": website_url,
-                    "email": email_address # NEW FIELD
+                    
+                    # --- NEW: Placeholder for the next step in the pipeline ---
+                    "validation_details": {
+                        "is_valid": False,
+                        "status": "PENDING",
+                        "expiry_date": None,
+                        "last_verified": None
+                    }
                 }
             else:
-                return {"status": "NO_MATCH", "error": "API returned zero results for this ID."}
+                return {"status": "NO_MATCH", "npi_number": npi_number, "error": "Zero results found."}
         except Exception as e:
-            return {"status": "ERROR", "error": f"NPI Lookup Failed: {str(e)}"}
-        
-# 2. Information Enrichment Agent: Web Scraping (MOCK)
+            return {"status": "ERROR", "npi_number": npi_number, "error": str(e)}
+
 async def scrape_contact_info(url: str) -> dict:
     """Mocks web scraping."""
     await asyncio.sleep(0.5) 
@@ -310,15 +308,13 @@ async def validate_single_json(provider_data: ProviderInput):
 @app.post("/batch/npi_lookup", response_model=List[NpiDetailsOutput])
 async def batch_npi_lookup(batch_data: BatchInput) -> List[NpiDetailsOutput]:
     """
-    Runs the NPI lookup function for a batch of NPI IDs concurrently.
+    Runs the NPI lookup function for a batch of NPI IDs concurrently 
+    and prepares state-specific routing data.
     """
     lookup_tasks = []
     
     for provider in batch_data.providers:
-        # Note: We still only pass NPI ID here for the pure NPI batch test
-        task = asyncio.create_task(
-            lookup_npi_registry(provider.npi) 
-        )
+        task = asyncio.create_task(lookup_npi_registry(provider.npi))
         lookup_tasks.append(task)
         
     raw_results = await asyncio.gather(*lookup_tasks, return_exceptions=True)
@@ -328,7 +324,7 @@ async def batch_npi_lookup(batch_data: BatchInput) -> List[NpiDetailsOutput]:
     for i, result in enumerate(raw_results):
         npi = batch_data.providers[i].npi
         
-        # Handle exceptions (e.g., timeouts, network errors)
+        # 1. Handle Critical Exceptions (Timeouts, Network failures)
         if isinstance(result, Exception):
              final_results.append(NpiDetailsOutput(
                 npi_number=npi,
@@ -336,32 +332,38 @@ async def batch_npi_lookup(batch_data: BatchInput) -> List[NpiDetailsOutput]:
                 name="N/A",
                 address="N/A",
                 phone="N/A",
-                legal_name=None, # Changed from "N/A" to None to match new schema type
+                state="N/A", # Added state
+                legal_name=None,
                 license_id=None,
                 specialty=None,
-                email=None,          # NEW: Map None on error
-                website_url=None,    # NEW: Map None on error
-                error_detail=str(result)
+                email=None,
+                website_url=None,
+                error_detail=str(result),
+                validation_details=LicenseValidation(status="ERROR") # Added nested object
             ))
              continue
         
-        # Format successful/NO_MATCH results (Updated mapping)
+        # 2. Format successful/NO_MATCH results
+        # We use .get() to safely map the new 'state' and 'validation_details' fields
         final_results.append(NpiDetailsOutput(
             npi_number=npi,
             status=result["status"],
             name=result.get("name", "N/A"),
             address=result.get("address", "N/A"),
             phone=result.get("phone", "N/A"),
+            state=result.get("state", "N/A"), # NEW: Crucial for State Routing
             
-            # --- Mapped from lookup_npi_registry result ---
-            legal_name=result.get("legal_name", None), 
-            license_id=result.get("license_id", None), 
-            specialty=result.get("specialty", None), 
-            email=result.get("email", None),          # NEW: Map email from result
-            website_url=result.get("website_url", None), # NEW: Map website_url from result
-            # ----------------------------------------------
+            legal_name=result.get("legal_name"), 
+            license_id=result.get("license_id"), 
+            specialty=result.get("specialty"), 
+            email=result.get("email"),
+            website_url=result.get("website_url"),
             
-            error_detail=result.get("error", None)
+            error_detail=result.get("error"),
+            
+            # NEW: Mapping the nested validation block
+            # This will show "PENDING" for now as we haven't run state lookups yet
+            validation_details=result.get("validation_details", LicenseValidation())
         ))
         
     return final_results
