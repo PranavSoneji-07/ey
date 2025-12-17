@@ -6,63 +6,73 @@ def run_validation_agent(file_a_path, file_b_path, output_path="validation_resul
     df_a = pd.read_csv(file_a_path)
     df_b = pd.read_csv(file_b_path)
 
-    # 2. Define the weighted importance of each field
-    # Total sum = 1.0
-    weights = {
-        'NPI': 0.4,
+    # 2. Define Weights with "Standardized" keys
+    # We will normalize these keys to lowercase/no-space for matching
+    raw_weights = {
+        'npi_number': 0.4,
         'Provider Name(Legal name)': 0.1,
         'Address': 0.05,
-        'Phone number': 0.1,
-        'License number': 0.35
+        'phone': 0.1,
+        'license_id': 0.35
     }
+    
+    # Helper to clean column names (e.g., "Phone Number" -> "phonenumber")
+    def clean_col_name(name):
+        return "".join(filter(str.isalnum, str(name))).lower()
 
-    # 3. Clean Data (Standardize for comparison)
-    # We strip spaces and uppercase strings so "npi123" matches "NPI123 "
-    for col in weights.keys():
-        for df in [df_a, df_b]:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.strip().str.upper().replace(['NAN', 'NONE', ''], np.nan)
+    # Standardize weights dictionary keys
+    weights = {clean_col_name(k): v for k, v in raw_weights.items()}
+    
+    # Standardize DataFrame column names for the duration of the script
+    original_cols_a = df_a.columns.tolist()
+    df_a.columns = [clean_col_name(c) for c in df_a.columns]
+    df_b.columns = [clean_col_name(c) for c in df_b.columns]
 
-    # 4. Initialize scoring columns
+    # 3. Drop columns from A that are completely empty
+    df_a = df_a.dropna(axis=1, how='all')
+
+    # 4. Initialize scoring
     df_a['confidence_score'] = 1.0
     df_a['mismatch_reasons'] = ""
 
     # 5. Comparison Logic
-    for field, weight in weights.items():
-        if field not in df_a.columns or field not in df_b.columns:
-            continue
+    checked = []
+    for clean_field, weight in weights.items():
+        if clean_field in df_a.columns and clean_field in df_b.columns:
+            checked.append(clean_field)
             
-        # Logic: 
-        # A_exists = True if File A is NOT null
-        # Mismatch = True if A != B
-        a_exists = df_a[field].notnull()
-        mismatch = df_a[field] != df_b[field]
+            # Convert to string, strip, and uppercase for a "fair" comparison
+            def normalize_val(val):
+                if pd.isna(val) or str(val).strip().lower() in ['nan', 'none', '']:
+                    return None
+                return str(val).strip().upper()
 
-        # Trigger deduction ONLY if value exists in A AND it doesn't match B
-        deduct_mask = a_exists & mismatch
+            series_a = df_a[clean_field].apply(normalize_val)
+            series_b = df_b[clean_field].apply(normalize_val)
 
-        # Apply the weight reduction
-        df_a.loc[deduct_mask, 'confidence_score'] -= weight
-        
-        # Log the specific field failure
-        df_a.loc[deduct_mask, 'mismatch_reasons'] += f"{field} mismatch; "
+            # Rule: IF A has data AND it doesn't match B
+            mismatch = (series_a.notnull()) & (series_a != series_b)
 
-    # 6. Final Clean up
+            df_a.loc[mismatch, 'confidence_score'] -= weight
+            df_a.loc[mismatch, 'mismatch_reasons'] += f"{clean_field} mismatch; "
+
+    # 6. Final cleanup and restore original column names for the output
     df_a['confidence_score'] = df_a['confidence_score'].round(2).clip(lower=0)
     
-    # Categorize results
-    def categorize(score):
-        if score == 1.0: return "Perfect Match"
-        if score >= 0.7: return "Partial Match (Minor Issues)"
-        return "Critical Mismatch"
+    # Map back to original column names for the report
+    column_mapping = {clean_col_name(original): original for original in original_cols_a}
+    df_a.rename(columns=column_mapping, inplace=True)
 
-    df_a['validation_status'] = df_a['confidence_score'].apply(categorize)
-
-    # 7. Export results
+    # 7. Export
     df_a.to_csv(output_path, index=False)
-    print(f"Validation Agent: Processed {len(df_a)} rows. Report saved to {output_path}")
+    print(f"--- Validation Complete ---")
+    print(f"Processed: {len(df_a)} rows")
+    print(f"Matched & Checked Columns: {checked}")
+    
+    if not checked:
+        print("CRITICAL: No columns matched! Check if your CSV headers match the weights.")
     
     return df_a
 
-# Example Usage:
-# results = run_validation_agent('provider_source.csv', 'provider_target.csv')
+# Run it
+run_validation_agent('provider_output.csv', 'npi_batch_results.csv')
