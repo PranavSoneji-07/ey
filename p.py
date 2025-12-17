@@ -1,1003 +1,233 @@
 import os
-
 import io
-
 import re
-
 from typing import List, Dict, Any, Tuple, Generator
-
 import numpy as np
-
 import pandas as pd
-
 from pdf2image import convert_from_path
+
 os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
-
 from paddleocr import PaddleOCR
-
 import spacy
 
-"""
-
---- OPTIONAL: Google Vision imports (if you use fallback) ---
-
-try:
-
-    from google.cloud import vision
-
-    HAS_GOOGLE_VISION = True
-
-except ImportError:
-
-    HAS_GOOGLE_VISION = False
-
-"""
-
-
-
-
-
-# OCR
-
+# OCR Configuration
 PADDLE_LANG = "en"
-
 PADDLE_OCR = PaddleOCR(lang=PADDLE_LANG)
-
-OCR_CONFIDENCE_THRESHOLD = 0.75  # if below this, try Google Vision
-
-
+OCR_CONFIDENCE_THRESHOLD = 0.75
 
 # Regex patterns
-
-NPI_REGEX = re.compile(r"(?:NPI[:\s#-]*)?(\d{10})")
-
+NPI_REGEX = re.compile(r"(?:npi|number|numbex)?[:\s#-]*([12]\d{9})", re.IGNORECASE)
 PHONE_REGEX = re.compile(r"(?<!\d)([2-9]\d{9})(?!\d)")
-
-LICENSE_REGEX = re.compile(r"(?:License(?:\s*No\.?| #| Number)?[:\s-]*)([A-Za-z0-9-]+)",re.IGNORECASE)
-
-
-
-EMAIL_REGEX = re.compile(
-
-    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-
+LICENSE_REGEX = re.compile(
+    r"(?:license|lic|id)(?:\s*id|\s*no\.?|\s*number)?[:\s#-]+(?=.*\d)([A-Za-z0-9-]{4,15})", 
+    re.IGNORECASE
 )
+EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
+# Words that OCR frequently misidentifies as the actual ID
+INVALID_IDS = {"license", "number", "npi", "null", "none", "id", "provider", "numbex"}
 
-
-# spaCy model
-
+# spaCy model loader
 NLP = None
-
-
-
 def get_nlp():
-
     global NLP
-
     if NLP is None:
-
         try:
-
             NLP = spacy.load("en_core_web_trf")
-
-        except OSError as e:
-
-            # Optional: fallback if trf model not installed
-
-            print("[WARN] Could not load en_core_web_trf:", e)
-
-          #  print("[WARN] Falling back to en_core_web_sm")
-
-         #   NLP = spacy.load("en_core_web_sm")
-
+        except OSError:
+            print("[WARN] Could not load en_core_web_trf.")
     return NLP
 
-
-
-
-
 # ==========================
-
-# PDF -> IMAGES
-
+# PDF & OCR HELPERS
 # ==========================
-
-
 
 def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[Any]:
-
-    """
-
-    Convert PDF to a list of PIL Images.
-
-    """
-
-    images = convert_from_path(pdf_path, dpi=dpi)
-
-    return images
-
-
-
-
-
-# ==========================
-
-# OCR HELPERS
-
-# ==========================
-
-
-
-import numpy as np   # put this at the top
-
-
+    return convert_from_path(pdf_path, dpi=dpi)
 
 def run_paddle_ocr(image):
-
     img_np = np.array(image)
-
     result = PADDLE_OCR.predict(img_np)
-
-
-
-    if not result:
-
-        return [], "paddle"
-
-
-
+    if not result: return [], "paddle"
+    
     texts = result[0]["rec_texts"]
-
     scores = result[0]["rec_scores"]
-
-    print(texts)
-
-    text_blocks = []
-
-    for txt, score in zip(texts, scores):
-
-        if not txt.strip():
-
-            continue
-
-        text_blocks.append({
-
-            "text": txt.strip(),  
-
-            "conf": float(score),  
-
-        })
-
-
-
-
-
+    text_blocks = [{"text": txt.strip(), "conf": float(score)} 
+                   for txt, score in zip(texts, scores) if txt.strip()]
     return text_blocks, "paddle"
 
-
-
-
-
-
-
-"""
-
- def run_google_vision(image) -> Tuple[List[Dict[str, Any]], float]:
-
-   
-
-    Run Google Vision OCR on a PIL image.
-
-    You must have GOOGLE_APPLICATION_CREDENTIALS set and google-cloud-vision installed.
-
-    Returns: (list of text blocks, avg_confidence)
-
-   
-
-    if not HAS_GOOGLE_VISION:
-
-        # Fallback stub if library not installed
-
-        return [], 0.0
-
-
-
-    client = vision.ImageAnnotatorClient()
-
-
-
-    # Convert PIL image to bytes
-
-    img_byte_arr = io.BytesIO()
-
-    image.save(img_byte_arr, format="PNG")
-
-    content = img_byte_arr.getvalue()
-
-
-
-    image_obj = vision.Image(content=content)
-
-    response = client.document_text_detection(image=image_obj)
-
-    annotation = response.full_text_annotation
-
-
-
-    text_blocks = []
-
-    confidences = []
-
-
-
-    for page in annotation.pages:
-
-        for block in page.blocks:
-
-            block_text = []
-
-            block_confidences = []
-
-            for paragraph in block.paragraphs:
-
-                for word in paragraph.words:
-
-                    word_text = "".join(
-
-                        [symbol.text for symbol in word.symbols]
-
-                    )
-
-                    block_text.append(word_text)
-
-                    if word.confidence is not None:
-
-                        block_confidences.append(float(word.confidence))
-
-
-
-            txt = " ".join(block_text).strip()
-
-            if not txt:
-
-                continue
-
-
-
-            # Approximate bounding box
-
-            box = [
-
-                (v.x, v.y) for v in block.bounding_box.vertices
-
-            ]
-
-
-
-            if block_confidences:
-
-                c = sum(block_confidences) / len(block_confidences)
-
-                confidences.append(c)
-
-            else:
-
-                c = 0.0
-
-
-
-            text_blocks.append({
-
-                "text": txt,
-
-                "conf": c,
-
-                "box": box,
-
-            })
-
-
-
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-
-    return text_blocks, avg_conf
-
-"""
-
-
-
-
-
 def run_ocr_with_fallback(image, threshold: float = OCR_CONFIDENCE_THRESHOLD):
-
-    """
-
-    Run PaddleOCR, and if quality is poor, fallback to Google Vision.
-
-    Returns: (text_blocks, avg_conf, engine_used)
-
-    """
-
-    text_blocks, engine_used = run_paddle_ocr(image)
-
-    # avg_conf = paddle_conf
-
-
-
-    # if paddle_conf < threshold and HAS_GOOGLE_VISION:
-
-    #     gv_blocks, gv_conf = run_google_vision(image)
-
-    #     if gv_conf > paddle_conf:
-
-    #         text_blocks = gv_blocks
-
-    #         avg_conf = gv_conf
-
-    #         engine_used = "google_vision"
-
-
-
-    return text_blocks, engine_used
-
-
-
-"""
-
-def assemble_text(text_blocks: List[Dict[str, Any]]) -> str:
-
-   
-
-    Assemble text blocks into a single text string.
-
-    Sort by Y then X for a more natural reading order.
-
-   
-
-    def _key(block):
-
-        # box is list of 4 points; take top-left
-
-        box = block["box"]
-
-        if not box:
-
-            return (0, 0)
-
-        x = box[0][0]
-
-        y = box[0][1]
-
-        return (y, x)
-
-
-
-    sorted_blocks = sorted(text_blocks, key=_key)
-
-    return "\n".join(b["text"] for b in sorted_blocks if b["text"].strip())
-
-"""
-
-
-
-
-
-# NLP / EXTRACTION
-
-
-
-
-
-def extract_provider_name(doc: spacy.tokens.Doc) -> Tuple[str, float]:
-
-    """
-
-    Heuristic:
-
-    - Prefer ORG entities that contain 'Hospital', 'Clinic', 'Medical', 'Center', etc.
-
-    - Otherwise take the longest ORG entity.
-
-    """
-
-    keywords = ["hospital", "clinic", "medical", "centre", "center", "health", "provider"]
-
-    orgs = [ent for ent in doc.ents if ent.label_ == "ORG"]
-
-
-
-    best = None
-
-    best_score = 0.0
-
-
-
-    for ent in orgs:
-
-        text_lower = ent.text.lower()
-
-        score = len(ent.text)  # base: length
-
-        if any(k in text_lower for k in keywords):
-
-            score += 20  # strong bonus if keyword present
-
-        if score > best_score:
-
-            best_score = score
-
-            best = ent
-
-
-
-    if best is None and orgs:
-
-        best = max(orgs, key=lambda e: len(e.text))
-
-        best_score = len(best.text)
-
-
-
-    if best:
-
-        # normalize confidence to 0.5–0.95 range
-
-        conf = min(0.95, 0.5 + best_score / 50.0)
-
-        return best.text.strip(), conf
-
-
-
-    return None, 0.0
-
-
-
-
-
-def extract_address(text: str, provider_name: str = None) -> Tuple[str, float]:
-
-    """
-
-    Very simple heuristic address extractor:
-
-    - Look for lines with address-ish clues (street, road, city, zip, etc.)
-
-    - If provider_name is present, take lines after it.
-
-    """
-
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    candidate_lines = []
-
-
-
-    # rough indicators
-
-    addr_keywords = [
-
-        "street", "st.", "st,", "road", "rd", "ave", "avenue",
-
-        "blvd", "block", "city", "state", "zip", "pincode",
-
-        "pin code", "suite", "floor", "flr", "building"
-
-    ]
-
-
-
-    # We’ll also try to limit to block around provider name
-
-    start_idx = 0
-
-    if provider_name:
-
-        for i, ln in enumerate(lines):
-
-            if provider_name.lower() in ln.lower():
-
-                # start looking from this line onwards
-
-                start_idx = i
-
-                break
-
-
-
-    for ln in lines[start_idx:]:
-
-        lower = ln.lower()
-
-        if any(k in lower for k in addr_keywords):
-
-            candidate_lines.append(ln)
-
-
-
-    if not candidate_lines:
-
-        return None, 0.0
-
-
-
-    address = ", ".join(candidate_lines)
-
-    return address, 0.7
-
-
-
-
-
-def extract_specialities(text: str) -> Tuple[str, float]:
-
-    """
-
-    Extract specialities:
-
-    - Look for lines containing 'Speciality', 'Specialties', 'Specialization', etc.
-
-    - Return comma-separated list.
-
-    """
-
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    keywords = ["speciality", "specialties", "speciality:", "specializations",
-
-                "specialization", "specialty", "department", "dept"]
-
-    speciality_lines = []
-
-
-
-    for ln in lines:
-
-        lower = ln.lower()
-
-        if any(k in lower for k in keywords):
-
-            # strip label part
-
-            parts = re.split(r":", ln, maxsplit=1)
-
-            if len(parts) == 2:
-
-                val = parts[1].strip()
-
-            else:
-
-                val = ln
-
-            speciality_lines.append(val)
-
-
-
-    if not speciality_lines:
-
-        return None, 0.0
-
-
-
-    # Merge and normalize
-
-    full = ", ".join(speciality_lines)
-
-    # Split on comma/semicolon for cleaning
-
-    items = [x.strip() for x in re.split(r"[;,]", full) if x.strip()]
-
-    items = sorted(set(items), key=lambda s: s.lower())
-
-    result = ", ".join(items)
-
-    return result, 0.85
-
-
-
-
-
-def extract_fields(text: str) -> Tuple[Dict[str, Any], Dict[str, float], float]:
-
-    """
-
-    Main extractor: NPI, Provider Name (Legal name), Address, Phone number,
-
-    License number, Specialities.
-
-    """
-
-    nlp = get_nlp()
-
-    doc = nlp(text)
-
-        # Pre-clean OCR text for emails
-
-    clean_text = re.sub(r"\s*@\s*", "@", text)
-
-    text = re.sub(r"\s*\.\s*", ".", clean_text)
-
-
-
-    data = {
-
-        "NPI": None,
-
-        "Provider Name (Legal name)": None,
-
-        "Address": None,
-
-        "Phone number": None,
-
-        "Email address": None,
-
-        "License number": None,
-
-        "Specialities": None,
-
-    }
-
-
-
-    conf = {k: 0.0 for k in data.keys()}
-
-
-
-    # Provider name
-
-    provider_name, pn_conf = extract_provider_name(doc)
-
-    data["Provider Name (Legal name)"] = provider_name
-
-    conf["Provider Name (Legal name)"] = pn_conf
-
-
-
-    # NPI
-
-    npi_match = NPI_REGEX.search(text)
-
-    if npi_match:
-
-        data["NPI"] = npi_match.group(1)
-
-        conf["NPI"] = 0.95
-
-
-
-    # Phone number
-
-    phone_match = PHONE_REGEX.search(text)
-
-    if phone_match:
-
-        data["Phone number"] = phone_match.group(1).strip()
-
-        conf["Phone number"] = 0.9
-
-
-
-    # License number
-
-    lic_match = LICENSE_REGEX.search(text)
-
-    if lic_match:
-
-        data["License number"] = lic_match.group(1).strip()
-
-        conf["License number"] = 0.9
-
-       
-
-    # Email address
-
-    email_match = EMAIL_REGEX.search(text)
-
-    if email_match:
-
-        email = normalize_email(email_match.group(0))
-
-        data["Email address"] = email
-
-        conf["Email address"] = 0.95
-
-
-
-    # Specialities
-
-    specs, specs_conf = extract_specialities(text)
-
-    if specs:
-
-        data["Specialities"] = specs
-
-        conf["Specialities"] = specs_conf
-
-
-
-    # Address (use provider name for context)
-
-    address, addr_conf = extract_address(text, provider_name)
-
-    if address:
-
-        data["Address"] = address
-
-        conf["Address"] = addr_conf
-
-
-
-    # overall confidence
-
-    overall_conf = sum(conf.values()) / len(conf) if conf else 0.0
-
-
-
-    return data, conf, overall_conf
-
-
-
-
+    return run_paddle_ocr(image)
 
 # ==========================
-
-# NORMALIZATION (pandas)
-
+# NORMALIZATION FUNCTIONS
 # ==========================
-
-
 
 def normalize_text(value: Any) -> Any:
-
-    if not isinstance(value, str):
-
-        return value
-
+    if not isinstance(value, str): return value
     return re.sub(r"\s+", " ", value).strip()
 
-
-
-
-
 def normalize_npi(npi: Any) -> Any:
-
-    if not isinstance(npi, str):
-
-        return npi
-
+    if not isinstance(npi, str): return npi
     digits = "".join(ch for ch in npi if ch.isdigit())
-
-    if len(digits) == 10:
-
-        return digits
-
-    return digits or None
-
-
-
-
+    return digits if len(digits) == 10 else None
 
 def normalize_phone(phone: Any) -> Any:
-
-    if not isinstance(phone, str):
-
-        return phone
-
+    if not isinstance(phone, str): return phone
     digits = "".join(ch for ch in phone if ch.isdigit())
-
-    if not digits:
-
-        return None
-
-    # very simple formatter, adjust to your region
-
     if len(digits) == 10:
-
-        return f"({digits[0:3]}) {digits[3:6]}-{digits[6:]}"
-
-    return digits  # leave as-is if not 10 digits
-
-
-
-
+        # UPDATED: XXX-XXX-XXXX format
+        return f"{digits[0:3]}-{digits[3:6]}-{digits[6:]}"
+    return digits if digits else None
 
 def normalize_email(raw: str) -> str:
-
-    """
-
-    Fix common OCR email issues:
-
-    - spaces around @ and .
-
-    - ' dot ' → '.'
-
-    """
-
-    if not raw:
-
-        return None
-
-
-
+    if not raw: return None
     email = raw.lower()
-
     email = re.sub(r"\s*@\s*", "@", email)
-
     email = re.sub(r"\s*\.\s*", ".", email)
-
-    email = email.replace(" dot ", ".")
-
-    return email
-
-
-
-
+    return email.replace(" dot ", ".")
 
 def normalize_specialities(specs: Any) -> Any:
-
-    if not isinstance(specs, str):
-
-        return specs
-
-    items = [x.strip() for x in re.split(r"[;,]", specs) if x.strip()]
-
-    # title-case for readability
-
-    items = [item.title() for item in items]
-
-    # remove duplicates
-
-    items = sorted(set(items), key=lambda s: s.lower())
-
-    return ", ".join(items)
-
-
-
-
-
-def normalize_record(raw_data: Dict[str, Any], meta: Dict[str, Any]) -> pd.DataFrame:
-
-    """
-
-    raw_data: fields extracted by NLP
-
-    meta: {engine, ocr_conf, extraction_conf, source_file}
-
-    Returns a single-row DataFrame.
-
-    """
-
-    df = pd.DataFrame([raw_data])
-
-
-
-    # Strip/clean all text columns
-
-    for col in df.columns:
-
-        df[col] = df[col].apply(normalize_text)
-
-
-
-    # Field-specific normalization
-
-    if "NPI" in df.columns:
-
-        df["NPI"] = df["NPI"].apply(normalize_npi)
-
-
-
-    if "Phone number" in df.columns:
-
-        df["Phone number"] = df["Phone number"].apply(normalize_phone)
-
-
-
-    if "Specialities" in df.columns:
-
-        df["Specialities"] = df["Specialities"].apply(normalize_specialities)
-
-
-
-    # Attach meta
-
-    df["ocr_engine_used"] = meta.get("engine")
-
-    df["ocr_quality_score"] = meta.get("ocr_conf")
-
-    df["extraction_confidence"] = meta.get("extraction_conf")
-
-    df["source_file"] = meta.get("source_file")
-
-
-
-    return df
+    if not isinstance(specs, str): return specs
+    items = [x.strip().title() for x in re.split(r"[;,]", specs) if x.strip()]
+    return ", ".join(sorted(set(items), key=lambda s: s.lower()))
 
 # ==========================
-# MAIN PIPELINE
+# EXTRACTION LOGIC
 # ==========================
+
+def extract_provider_name(doc: spacy.tokens.Doc) -> Tuple[str, float]:
+    keywords = ["hospital", "clinic", "medical", "centre", "center", "health", "provider"]
+    orgs = [ent for ent in doc.ents if ent.label_ == "ORG"]
+    best = None
+    best_score = 0.0
+    for ent in orgs:
+        score = len(ent.text) + (20 if any(k in ent.text.lower() for k in keywords) else 0)
+        if score > best_score:
+            best_score, best = score, ent
+    if not best and orgs:
+        best = max(orgs, key=lambda e: len(e.text))
+        best_score = len(best.text)
+    return (best.text.strip(), min(0.95, 0.5 + best_score / 50.0)) if best else (None, 0.0)
+
+def extract_address(text: str, provider_name: str = None) -> Tuple[str, float]:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    addr_keywords = ["street", "st.", "road", "ave", "blvd", "city", "state", "zip", "suite"]
+    start_idx = 0
+    if provider_name:
+        for i, ln in enumerate(lines):
+            if provider_name.lower() in ln.lower():
+                start_idx = i
+                break
+    candidates = [ln for ln in lines[start_idx:] if any(k in ln.lower() for k in addr_keywords)]
+    return (", ".join(candidates), 0.7) if candidates else (None, 0.0)
+
+def extract_specialities(text: str) -> Tuple[str, float]:
+    keywords = ["speciality", "specialties", "specialization", "specialty", "dept"]
+    found = []
+    for ln in text.splitlines():
+        if any(k in ln.lower() for k in keywords):
+            parts = re.split(r":", ln, maxsplit=1)
+            found.append(parts[1].strip() if len(parts) == 2 else ln.strip())
+    return (", ".join(found), 0.85) if found else (None, 0.0)
+
+def extract_fields(text: str) -> Tuple[Dict[str, Any], float]:
+    clean_text = " ".join(text.split())
+    text_for_ids = re.sub(r'(\d)\s+(\d)', r'\1\2', clean_text)
+    
+    # NEW: Updated Column Names
+    data = {
+        "npi_number": None, 
+        "Provider Name (Legal name)": None, 
+        "Address": None,
+        "phone": None, 
+        "Email address": None, 
+        "license_id": None, 
+        "Specialities": None
+    }
+    
+    # NPI
+    npi_m = NPI_REGEX.search(text_for_ids)
+    if npi_m: data["npi_number"] = npi_m.group(1)
+    
+    # License ID
+    lic_m = LICENSE_REGEX.search(clean_text)
+    if lic_m:
+        val = lic_m.group(1).strip()
+        if val.lower() not in INVALID_IDS and val != data["npi_number"]:
+            data["license_id"] = val
+            
+    # Phone
+    ph_m = PHONE_REGEX.search(text_for_ids)
+    if ph_m: data["phone"] = ph_m.group(1)
+    
+    # Email
+    em_m = EMAIL_REGEX.search(clean_text)
+    if em_m: data["Email address"] = normalize_email(em_m.group(0))
+    
+    # NLP
+    doc = get_nlp()(re.sub(r'\s+', ' ', text).strip())
+    data["Provider Name (Legal name)"], _ = extract_provider_name(doc)
+    data["Address"], _ = extract_address(text, data["Provider Name (Legal name)"])
+    data["Specialities"], _ = extract_specialities(text)
+    
+    return data, 0.8
 
 # ==========================
 # MAIN PIPELINE
 # ==========================
 
 def process_pdf(pdf_path: str, batch_size: int = 10) -> Generator[List[Dict[str, Any]], None, None]:
-    """
-    Processes the PDF and YIELDS a list of dictionaries every N providers.
-    """
     images = pdf_to_images(pdf_path)
     current_batch = []
     source_abs = os.path.abspath(pdf_path)
-
+    
     for i, img in enumerate(images):
         print(f"Processing page {i+1}/{len(images)}...")
-        
         blocks, engine = run_ocr_with_fallback(img)
-        page_text = "\n".join(b["text"] for b in blocks)
+        page_text = " ".join(b["text"] for b in blocks)
         
-        if not page_text.strip():
-            continue
+        if not page_text.strip(): continue
 
-        # Extract fields
-        raw_data, field_conf, extraction_conf = extract_fields(page_text)
+        raw_data, ext_conf = extract_fields(page_text)
 
-        # Meta information
+        # Apply Normalization before batching
+        raw_data["npi_number"] = normalize_npi(raw_data["npi_number"])
+        raw_data["phone"] = normalize_phone(raw_data["phone"])
+        raw_data["Specialities"] = normalize_specialities(raw_data["Specialities"])
+        for k in ["Provider Name (Legal name)", "Address", "license_id"]:
+            raw_data[k] = normalize_text(raw_data[k])
+
         meta = {
             "ocr_engine_used": engine,
-            "ocr_quality_score": 0.0,
-            "extraction_confidence": extraction_conf,
+            "extraction_confidence": ext_conf,
             "source_file": source_abs,
             "page_number": i + 1 
         }
 
-        # Merge extraction data and meta into one dictionary
-        # We bypass the DataFrame here to avoid "NaN" issues in dictionaries
-        record_dict = {**raw_data, **meta}
-        
-        # Explicitly clean the dictionary (replaces NaN with None for better visibility)
-        record_dict = {k: (v if v is not None else "N/A") for k, v in record_dict.items()}
-        
-        current_batch.append(record_dict)
+        record = {**raw_data, **meta}
+        record = {k: (v if v is not None else "N/A") for k, v in record.items()}
+        current_batch.append(record)
 
-        # Yield when batch is full
         if len(current_batch) == batch_size:
             yield current_batch
             current_batch = []
 
-    # Final leftover batch
-    if current_batch:
-        yield current_batch
-
-
-# ==========================
-# UPDATED CLI
-# ==========================
+    if current_batch: yield current_batch
 
 if __name__ == "__main__":
     import argparse
-
-    parser = argparse.ArgumentParser(description="Extract provider details.")
-    parser.add_argument("pdf_path", help="Path to the input PDF file")
-    parser.add_argument("--out", help="Output CSV path", default="provider_output.csv")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("pdf_path")
+    parser.add_argument("--out", default="provider_output.csv")
     args = parser.parse_args()
 
-    all_data_for_csv = []
-    
-    print(f"Starting extraction for: {args.pdf_path}")
-    
-    # Set batch_size=10 here
-    for batch_num, batch_data in enumerate(process_pdf(args.pdf_path, batch_size=10), 1):
-        print(f"\n--- BATCH {batch_num} RECEIVED ({len(batch_data)} providers) ---")
-        
-        # Verification: Print each dictionary
-        for provider in batch_data:
-            print(f"Found: {provider.get('Provider Name (Legal name)')} | NPI: {provider.get('NPI')}")
-            all_data_for_csv.append(provider)
+    all_data = []
+    for batch in process_pdf(args.pdf_path, batch_size=10):
+        for provider in batch:
+            print(f"Found: {provider.get('Provider Name (Legal name)')} | NPI: {provider.get('npi_number')}")
+            all_data.append(provider)
 
-    # Save the final CSV
-    if all_data_for_csv:
-        final_df = pd.DataFrame(all_data_for_csv)
-        final_df.to_csv(args.out, index=False)
-        print(f"\nSUCCESS: Total {len(all_data_for_csv)} providers saved to {args.out}")
-    else:
-        print("ERROR: No data was extracted from the PDF.")
+    if all_data:
+        pd.DataFrame(all_data).to_csv(args.out, index=False)
+        print(f"\nSUCCESS: Saved to {args.out}")
