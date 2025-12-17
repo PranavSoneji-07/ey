@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from pdf2image import convert_from_path
+os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 from paddleocr import PaddleOCR
 
